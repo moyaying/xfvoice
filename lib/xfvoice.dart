@@ -59,6 +59,10 @@ class XFVoice {
     await _channel.invokeMethod('start');
   }
 
+  Future<void> speech(String texts) async {
+    await _channel.invokeMethod('speech', texts);
+  }
+
   Future<void> stop() async {
     await _channel.invokeMethod('stop');
   }
@@ -196,4 +200,7 @@ class XFVoiceParam {
     param.removeWhere(isNull);
     return param;
   }
+
+
+  ///here is for self use
 }

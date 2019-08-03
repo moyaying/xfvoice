@@ -14,7 +14,9 @@ import com.iflytek.cloud.Setting;
 import com.iflytek.cloud.SpeechConstant;
 import com.iflytek.cloud.SpeechError;
 import com.iflytek.cloud.SpeechRecognizer;
+import com.iflytek.cloud.SpeechSynthesizer;
 import com.iflytek.cloud.SpeechUtility;
+import com.iflytek.cloud.SynthesizerListener;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,8 +37,8 @@ public class XfvoicePlugin implements MethodCallHandler {
     private Context applicationContext;
     //private Activity activity;
     private SpeechRecognizer recognizer;
+    private SpeechSynthesizer mTts;
     private String filePath;
-    private StringBuilder resultBuilder = new StringBuilder();
 
     /**
      * Plugin registration.
@@ -66,6 +68,9 @@ public class XfvoicePlugin implements MethodCallHandler {
             cancel(call, result);
         } else if (call.method.equals("dispose")) {
             dispose(call, result);
+        } else if (call.method.equals("speech")) {
+            speech((String) call.arguments);
+            result.success(null);
         } else {
             Log.e(TAG, "未找到方法，请检查方法名是否正确");
         }
@@ -101,17 +106,14 @@ public class XfvoicePlugin implements MethodCallHandler {
 
         @Override
         public void onResult(RecognizerResult results, boolean isLast) {
-            String result = resultBuilder.append(results.getResultString()).toString();
-            Log.d(TAG, "onResult():" + result);
+            Log.d(TAG, "onResult():" + results.getResultString());
 
             ArrayList<Object> arguments = new ArrayList<>();
-            arguments.add(result);
+            arguments.add(results.getResultString());
             arguments.add(isLast);
             channel.invokeMethod("onResults", arguments);
 
             if (isLast) {
-                resultBuilder.delete(0,resultBuilder.length());
-
                 ArrayList<Object> args = new ArrayList<>();
                 arguments.add(null);
                 arguments.add(filePath);
@@ -152,6 +154,15 @@ public class XfvoicePlugin implements MethodCallHandler {
             }
         });
 
+        mTts = SpeechSynthesizer.createSynthesizer(applicationContext, new InitListener() {
+            @Override
+            public void onInit(int code) {
+                if (code != ErrorCode.SUCCESS) {
+                    Log.e(TAG, "创建speechSynthesizer失败，错误码：" + code);
+                }
+            }
+        });
+
         result.success(null);
     }
 
@@ -159,22 +170,26 @@ public class XfvoicePlugin implements MethodCallHandler {
      * 设置参数
      */
     private void setParameter(MethodCall call, Result result) {
-        if (recognizer == null) {
-            Log.e(TAG, "recongnizer为null");
-        } else {
-            try {
-                Map<String, String> map = (Map<String, String>) call.arguments;
-                for (Map.Entry<String, String> entry : map.entrySet()) {
-                    if (entry.getKey().equals(SpeechConstant.ASR_AUDIO_PATH)) {
+        try {
+            Map<String, String> map = (Map<String, String>) call.arguments;
+            for (Map.Entry<String, String> entry : map.entrySet()) {
+                if (entry.getKey().equals(SpeechConstant.ASR_AUDIO_PATH)) {
+                    if (recognizer != null) {
                         filePath = Environment.getExternalStorageDirectory() + "/msc/" + entry.getValue();
                         recognizer.setParameter(SpeechConstant.ASR_AUDIO_PATH, filePath);
-                    } else {
+                    }
+                } else {
+                    if (recognizer != null) {
                         recognizer.setParameter(entry.getKey(), entry.getValue());
                     }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
+
+                if (mTts != null) {
+                    mTts.setParameter(entry.getKey(), entry.getValue());
+                }
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
 
         result.success(null);
@@ -207,6 +222,10 @@ public class XfvoicePlugin implements MethodCallHandler {
             recognizer.stopListening();
         }
 
+        if (mTts != null) {
+            mTts.stopSpeaking();
+        }
+
         result.success(null);
     }
 
@@ -218,6 +237,10 @@ public class XfvoicePlugin implements MethodCallHandler {
             Log.e(TAG, "recongnizer为null");
         } else {
             recognizer.cancel();
+        }
+
+        if (mTts != null) {
+            mTts.stopSpeaking();
         }
 
         result.success(null);
@@ -233,6 +256,11 @@ public class XfvoicePlugin implements MethodCallHandler {
             recognizer.cancel();//取消当前会话
             recognizer.destroy();//销毁recognizer单例
             recognizer = null;
+        }
+
+        if (mTts != null) {
+            mTts.stopSpeaking();
+            mTts.destroy();
         }
 
         result.success(null);
@@ -256,4 +284,67 @@ public class XfvoicePlugin implements MethodCallHandler {
 //    private void getPermisson() {
 //        ActivityCompat.requestPermissions(activity, permissions, 0);
 //    }
+
+
+    //for self use
+    /**
+     * 合成回调监听。
+     */
+    private SynthesizerListener mTtsListener = new SynthesizerListener() {
+        @Override
+        public void onSpeakBegin() {
+            Log.i(TAG, "开始播放");
+        }
+
+        @Override
+        public void onSpeakPaused() {
+            Log.i(TAG, "暂停播放");
+        }
+
+        @Override
+        public void onSpeakResumed() {
+            Log.i(TAG, "继续播放");
+        }
+
+        @Override
+        public void onBufferProgress(int percent, int beginPos, int endPos, String info) {
+            // 合成进度
+            Log.i(TAG, "合成进度:" + percent);
+        }
+
+        @Override
+        public void onSpeakProgress(int percent, int beginPos, int endPos) {
+            // 播放进度
+            Log.i(TAG, "播放进度:" + percent);
+        }
+
+        @Override
+        public void onCompleted(SpeechError error) {
+            if (error == null) {
+                Log.i(TAG, "播放完成");
+            } else {
+                Log.i(TAG, error.getPlainDescription(true));
+            }
+        }
+
+        @Override
+        public void onEvent(int eventType, int arg1, int arg2, Bundle obj) {
+            // 以下代码用于获取与云端的会话id，当业务出错时将会话id提供给技术支持人员，可用于查询会话日志，定位出错原因
+            // 若使用本地能力，会话id为null
+            //	if (SpeechEvent.EVENT_SESSION_ID == eventType) {
+            //		String sid = obj.getString(SpeechEvent.KEY_EVENT_SESSION_ID);
+            //		Log.d(TAG, "session id =" + sid);
+            //	}
+
+            //当设置SpeechConstant.TTS_DATA_NOTIFY为1时，抛出buf数据
+			/*if (SpeechEvent.EVENT_TTS_BUFFER == eventType) {
+						byte[] buf = obj.getByteArray(SpeechEvent.KEY_EVENT_TTS_BUFFER);
+						Log.e("MscSpeechLog", "buf is =" + buf);
+					}*/
+        }
+    };
+
+    private void speech(String texts) {
+        mTts.startSpeaking(texts, mTtsListener);
+    }
 }
